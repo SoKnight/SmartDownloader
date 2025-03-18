@@ -1,0 +1,16 @@
+[versions]
+jackson = "2.18.3"
+logback = "1.5.17"
+lombok = "1.18.36"
+retrofit = "2.11.0"
+slf4j = "2.0.17"
+xz = "1.10"
+
+[libraries]
+jacksonDatabind = { module = "com.fasterxml.jackson.core:jackson-databind", version.ref = "jackson" }
+logback = { module = "ch.qos.logback:logback-classic", version.ref = "logback" }
+lombok = { module = "org.projectlombok:lombok", version.ref = "lombok" }
+retrofit = { module = "com.squareup.retrofit2:retrofit", version.ref = "retrofit" }
+retrofitConverterJackson = { module = "com.squareup.retrofit2:converter-jackson", version.ref = "retrofit" }
+slf4jApi = { module = "org.slf4j:slf4j-api", version.ref = "slf4j" }
+xz = { module = "org.tukaani:xz", version.ref = "xz" }
