@@ -11,12 +11,14 @@ import okhttp3.Request;
 import okhttp3.Response;
 
 import java.io.IOException;
+import java.net.NoRouteToHostException;
 import java.net.SocketTimeoutException;
 import java.nio.channels.ReadableByteChannel;
 import java.nio.file.Path;
 import java.util.Objects;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
@@ -62,10 +64,21 @@ public abstract class ResourceDownloadBase extends CompletableFuture<Path> imple
 
     @Override
     public Path call() throws Exception {
+        long rangeEnd = service.getChunkSize() - 1;
+        Request request = requestBuilder.header("Range", "bytes=0-" + rangeEnd).build();
+
         try {
-            long rangeEnd = service.getChunkSize() - 1;
-            enqueue(requestBuilder.header("Range", "bytes=0-" + rangeEnd).build());
+            enqueue(request);
             return join();
+        } catch (CompletionException ex) {
+            Throwable cause = ex.getCause();
+
+            if (cause instanceof NoRouteToHostException) {
+                log.error("- '{}': no route to host ({})", name, request.url());
+                return null;
+            }
+
+            throw cause instanceof Exception cast ? cast : new IOException(cause);
         } finally {
             close();
         }
