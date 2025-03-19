@@ -24,6 +24,7 @@ public final class DownloadWatchdogService {
 
     private int speedMarksCursor;
     private long currentBytesReceived;
+    private boolean firstSpeedMarksRound;
     private long lastMeasureAt;
     private long lastComputeAt;
     private double minAverageSpeed;
@@ -71,8 +72,10 @@ public final class DownloadWatchdogService {
             if (currentSpeed == 0D)
                 return;
 
-            if (speedMarksCursor >= SPEED_MARKS_HISTORY_SIZE)
+            if (speedMarksCursor >= SPEED_MARKS_HISTORY_SIZE) {
                 this.speedMarksCursor %= SPEED_MARKS_HISTORY_SIZE;
+                this.firstSpeedMarksRound = false;
+            }
 
             this.speedMarks[speedMarksCursor++] = currentSpeed;
 
@@ -103,7 +106,7 @@ public final class DownloadWatchdogService {
     }
 
     private double computeAverageSpeed() {
-        int limit = Math.min(speedMarksCursor, SPEED_MARKS_HISTORY_SIZE);
+        int limit = firstSpeedMarksRound ? Math.min(speedMarksCursor, SPEED_MARKS_HISTORY_SIZE) : SPEED_MARKS_HISTORY_SIZE;
         return switch (limit) {
             case 0 -> 0D;
             case 1 -> speedMarks[0];
@@ -123,6 +126,7 @@ public final class DownloadWatchdogService {
         try {
             syncLock.lock();
             this.speedMarksCursor = 0;
+            this.firstSpeedMarksRound = true;
             this.lastMeasureAt = lastComputeAt = 0L;
             this.minAverageSpeed = lastAverageSpeed = maxAverageSpeed = 0D;
         } finally {
