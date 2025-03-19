@@ -109,7 +109,7 @@ public abstract class ResourceDownloadBase extends CompletableFuture<Path> imple
     public void onFailure(Call call, IOException ex) {
         if (ex instanceof SocketTimeoutException) {
             log.info("- '{}': <timeout> ... retrying ...", name);
-            enqueue(call.request());
+            retryRequest(call);
             return;
         }
 
@@ -154,7 +154,7 @@ public abstract class ResourceDownloadBase extends CompletableFuture<Path> imple
                 }
             } catch (SocketTimeoutException ex) {
                 log.info("- '{}': <timeout> ... retrying ...", name);
-                enqueue(call.request());
+                retryRequest(call);
             } catch (IOException ex) {
                 throw ex;
             } catch (Exception ex) {
@@ -204,7 +204,7 @@ public abstract class ResourceDownloadBase extends CompletableFuture<Path> imple
             }
         } catch (SocketTimeoutException ex) {
             log.info("- '{}': <timeout> ... retrying ...", name);
-            enqueue(call.request());
+            retryRequest(call);
         } catch (IOException ex) {
             throw ex;
         } catch (Exception ex) {
@@ -264,6 +264,23 @@ public abstract class ResourceDownloadBase extends CompletableFuture<Path> imple
         long length = to - from + 1;
         long totalLength = Long.parseLong(input.substring(slashIndex + 1));
         return new long[] { from, to, length, totalLength };
+    }
+
+    private void retryRequest(Call call) {
+        try {
+            syncLock.lock();
+
+            String rangeHeader = call.request().header("Range");
+            if (rangeHeader != null) {
+                requestBuilder.header("Range", rangeHeader);
+            } else {
+                requestBuilder.removeHeader("Range");
+            }
+
+            enqueue(requestBuilder.build());
+        } finally {
+            syncLock.unlock();
+        }
     }
 
     private void enqueue(Request request) {
