@@ -2,6 +2,8 @@ package me.soknight.sandbox.downloader;
 
 import lombok.Getter;
 import lombok.experimental.Accessors;
+import me.soknight.sandbox.downloader.okhttp.NoopHostnameVerifier;
+import me.soknight.sandbox.downloader.okhttp.NoopTrustManager;
 import me.soknight.sandbox.downloader.resource.DirectResourceDownload;
 import me.soknight.sandbox.downloader.resource.LzmaResourceDownload;
 import me.soknight.sandbox.downloader.task.DownloadTaskBase;
@@ -10,11 +12,16 @@ import okhttp3.Dispatcher;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
 
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManager;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.OpenOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.security.KeyManagementException;
+import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashSet;
@@ -50,7 +57,7 @@ public final class DownloadService implements AutoCloseable {
 
     public DownloadService() throws IOException {
         this.dispatcher = new Dispatcher(Executors.newVirtualThreadPerTaskExecutor());
-        this.httpClient = new OkHttpClient.Builder().dispatcher(dispatcher).build();
+        this.httpClient = createHttpClient();
         this.dispatcherSyncLock = new ReentrantLock();
 
         this.watchdogService = new DownloadWatchdogService();
@@ -148,6 +155,22 @@ public final class DownloadService implements AutoCloseable {
                     }
                 });
             }
+        }
+    }
+
+    private OkHttpClient createHttpClient() {
+        try {
+            SSLContext sslContext = SSLContext.getInstance("TLS");
+            NoopTrustManager noopTrustManager = new NoopTrustManager();
+            sslContext.init(null, new TrustManager[] {noopTrustManager}, new SecureRandom());
+
+            return new OkHttpClient.Builder()
+                    .dispatcher(dispatcher)
+                    .hostnameVerifier(new NoopHostnameVerifier())
+                    .sslSocketFactory(sslContext.getSocketFactory(), noopTrustManager)
+                    .build();
+        } catch (NoSuchAlgorithmException | KeyManagementException ex) {
+            throw new RuntimeException(ex);
         }
     }
 
