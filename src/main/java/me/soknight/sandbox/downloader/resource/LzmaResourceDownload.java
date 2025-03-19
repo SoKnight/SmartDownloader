@@ -3,11 +3,8 @@ package me.soknight.sandbox.downloader.resource;
 import me.soknight.sandbox.downloader.DownloadService;
 import org.tukaani.xz.LZMAInputStream;
 
-import java.io.ByteArrayInputStream;
 import java.io.IOException;
-import java.io.InputStream;
-import java.nio.ByteBuffer;
-import java.nio.channels.Channels;
+import java.nio.channels.FileChannel;
 import java.nio.channels.ReadableByteChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -19,7 +16,8 @@ import static me.soknight.sandbox.downloader.DownloadService.CHANNEL_OPEN_OPTION
 public final class LzmaResourceDownload extends ResourceDownloadBase {
 
     private final Lock syncLock;
-    private ByteBuffer outputBuffer;
+    private Path compressedFilePath;
+    private FileChannel outputChannel;
 
     public LzmaResourceDownload(DownloadService service, String url, Path outputFile, String name) {
         this(service, url, outputFile, name, -1L);
@@ -32,56 +30,45 @@ public final class LzmaResourceDownload extends ResourceDownloadBase {
 
     @Override
     protected long transferFrom(ReadableByteChannel source, long position, long count) throws IOException {
-        try {
-            syncLock.lock();
-
-            if (outputBuffer == null)
-                this.outputBuffer = ByteBuffer.allocateDirect(Math.toIntExact(getTotalSize()));
-
-            InputStream sourceStream = Channels.newInputStream(source);
-            byte[] buffer = new byte[8192];
-            int outputPosition = Math.toIntExact(position);
-            int bytesRead = 0;
-
-            while (bytesRead < count) {
-                int read = sourceStream.read(buffer);
-                if (read <= 0)
-                    break;
-
-                outputBuffer.put(outputPosition + bytesRead, buffer, 0, read);
-                bytesRead += read;
-            }
-
-            source.close();
-            if (bytesRead != count)
-                throw new IllegalStateException("Unexpected read count %d, expected %d".formatted(bytesRead, count));
-
-            return bytesRead;
-        } finally {
-            syncLock.unlock();
-        }
+        //noinspection resource
+        return outputChannel().transferFrom(source, position, count);
     }
 
     @Override
     public void close() throws Exception {
-        if (outputBuffer != null) {
-            ByteArrayInputStream compressedStream;
-            if (outputBuffer.hasArray()) {
-                compressedStream = new ByteArrayInputStream(outputBuffer.array(), outputBuffer.position(), outputBuffer.remaining());
-            } else {
-                byte[] byteArray = new byte[outputBuffer.remaining()];
-                outputBuffer.get(byteArray);
-                compressedStream = new ByteArrayInputStream(byteArray);
+        if (outputChannel == null)
+            return;
+
+        if (outputChannel.isOpen())
+            outputChannel.close();
+
+        Path outputFile = getOutputFile();
+        Files.createDirectories(outputFile.getParent());
+
+        try (
+                var input = new LZMAInputStream(Files.newInputStream(compressedFilePath));
+                var output = Files.newOutputStream(outputFile, DownloadService.CHANNEL_OPEN_OPTIONS)
+        ) {
+            input.transferTo(output);
+            output.flush();
+        } finally {
+            Files.deleteIfExists(compressedFilePath);
+        }
+    }
+
+    private FileChannel outputChannel() throws IOException {
+        try {
+            syncLock.lock();
+
+            if (outputChannel == null) {
+                this.compressedFilePath = Files.createTempFile(getService().tempDir(), "lzma-", null);
+                Files.createDirectories(compressedFilePath.toAbsolutePath().getParent());
+                this.outputChannel = FileChannel.open(compressedFilePath, CHANNEL_OPEN_OPTIONS);
             }
 
-            LZMAInputStream decompressedStream = new LZMAInputStream(compressedStream);
-
-            Path outputFile = getOutputFile();
-            Files.createDirectories(outputFile.getParent());
-
-            try (var outputStream = Files.newOutputStream(outputFile, CHANNEL_OPEN_OPTIONS)) {
-                decompressedStream.transferTo(outputStream);
-            }
+            return outputChannel;
+        } finally {
+            syncLock.unlock();
         }
     }
 

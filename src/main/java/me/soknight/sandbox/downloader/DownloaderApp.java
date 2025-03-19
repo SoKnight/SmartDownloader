@@ -124,6 +124,9 @@ public final class DownloaderApp implements AutoCloseable {
                     .setJavaRuntimeIndex(javaRuntimeIndex)
                     .setLibraryFacades(libraryFacades.values());
 
+            log.info("Downloading client distribution...");
+            long start = System.currentTimeMillis();
+
             scheduledExecutor.scheduleAtFixedRate(() -> {
                 double progress = task.computeProgress();
                 if (progress <= 0D)
@@ -133,17 +136,19 @@ public final class DownloaderApp implements AutoCloseable {
                 if (lastAverageSpeed <= 0D)
                     return;
 
+                double receivedSizeKBytes = task.getReceivedBytes() / 131072D;
+                double totalAvgSpeed = receivedSizeKBytes / (Math.max(1D, System.currentTimeMillis() - start) / 1000D);
+
                 log.info(
-                        "[{}%] Downloaded: {} MB of {} MB (AVG speed: {} mbps)",
+                        "[{}%] Downloaded: {} MB of {} MB (AVG speed: {} mbps, TAS: {} mbps)",
                         "%3s".formatted("%.0f".formatted(progress * 100D)),
                         "%5s".formatted("%.1f".formatted(task.getReceivedBytes() / 1048576D)),
                         "%5s".formatted("%.1f".formatted(task.getExpectedBytes() / 1048576D)),
-                        "%5s".formatted("%.1f".formatted(lastAverageSpeed))
+                        "%5s".formatted("%.1f".formatted(lastAverageSpeed)),
+                        "%5s".formatted("%.1f".formatted(totalAvgSpeed))
                 );
             }, 500L, 500L, TimeUnit.MILLISECONDS);
 
-            log.info("Downloading client distribution...");
-            long start = System.currentTimeMillis();
             downloadService.performTask(task);
 
             timeSpentSeconds = (System.currentTimeMillis() - start) / 1000D;

@@ -10,15 +10,19 @@ import okhttp3.Dispatcher;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
 
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.OpenOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.stream.Stream;
 
 @Accessors(fluent = true)
 public final class DownloadService implements AutoCloseable {
@@ -41,7 +45,10 @@ public final class DownloadService implements AutoCloseable {
     private final Set<DownloadTaskBase> runningTasks;
     private final Lock tasksSyncLock;
 
-    public DownloadService() {
+    @Getter
+    private final Path tempDir;
+
+    public DownloadService() throws IOException {
         this.dispatcher = new Dispatcher(Executors.newVirtualThreadPerTaskExecutor());
         this.httpClient = new OkHttpClient.Builder().dispatcher(dispatcher).build();
         this.dispatcherSyncLock = new ReentrantLock();
@@ -49,6 +56,8 @@ public final class DownloadService implements AutoCloseable {
         this.watchdogService = new DownloadWatchdogService();
         this.runningTasks = new HashSet<>();
         this.tasksSyncLock = new ReentrantLock();
+
+        this.tempDir = Files.createTempDirectory("smart-downloader-");
     }
 
     public Set<DownloadTaskBase> getRunningTasks() {
@@ -124,11 +133,22 @@ public final class DownloadService implements AutoCloseable {
     }
 
     @Override
-    public void close() {
+    public void close() throws IOException {
         httpClient.dispatcher().executorService().shutdown();
         httpClient.connectionPool().evictAll();
 
         watchdogService.shutdown();
+
+        if (Files.isDirectory(tempDir)) {
+            try (Stream<Path> paths = Files.walk(tempDir)) {
+                paths.sorted(Comparator.reverseOrder()).forEach(path -> {
+                    try {
+                        Files.delete(path);
+                    } catch (IOException ignored) {
+                    }
+                });
+            }
+        }
     }
 
 }
