@@ -56,7 +56,7 @@ public final class DownloadService implements AutoCloseable {
     private final Path tempDir;
 
     public DownloadService() throws IOException {
-        this.dispatcher = new Dispatcher(Executors.newVirtualThreadPerTaskExecutor());
+        this.dispatcher = createDispatcher();
         this.httpClient = createHttpClient();
         this.dispatcherSyncLock = new ReentrantLock();
 
@@ -104,7 +104,6 @@ public final class DownloadService implements AutoCloseable {
         try {
             dispatcherSyncLock.lock();
             dispatcher.setMaxRequests(maxSimultaneousDownloads);
-            dispatcher.setMaxRequestsPerHost(maxSimultaneousDownloads);
         } finally {
             dispatcherSyncLock.unlock();
         }
@@ -172,6 +171,12 @@ public final class DownloadService implements AutoCloseable {
         } catch (NoSuchAlgorithmException | KeyManagementException ex) {
             throw new RuntimeException(ex);
         }
+    }
+
+    private Dispatcher createDispatcher() {
+        Dispatcher dispatcher = new Dispatcher(Executors.newVirtualThreadPerTaskExecutor());
+        dispatcher.setMaxRequestsPerHost(35);
+        return dispatcher;
     }
 
 }
