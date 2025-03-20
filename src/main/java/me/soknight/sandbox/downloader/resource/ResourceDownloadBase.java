@@ -11,7 +11,6 @@ import okhttp3.Request;
 import okhttp3.Response;
 
 import java.io.IOException;
-import java.net.NoRouteToHostException;
 import java.net.SocketTimeoutException;
 import java.nio.channels.ReadableByteChannel;
 import java.nio.file.Path;
@@ -29,6 +28,7 @@ import java.util.function.LongConsumer;
 public abstract class ResourceDownloadBase extends CompletableFuture<Path> implements AutoCloseable, Callable<Path>, Callback {
 
     private static final AtomicLong ID_COUNTER = new AtomicLong();
+    private static final int MAX_RETRY_ATTEMPTS = 5;
 
     private final DownloadService service;
     private final long downloadId;
@@ -64,23 +64,34 @@ public abstract class ResourceDownloadBase extends CompletableFuture<Path> imple
 
     @Override
     public Path call() throws Exception {
-        long rangeEnd = service.getChunkSize() - 1;
-        Request request = requestBuilder.header("Range", "bytes=0-" + rangeEnd).build();
+        int attempts = 0;
+        while (true) {
+            long rangeEnd = service.getChunkSize() - 1;
+            Request request = requestBuilder.header("Range", "bytes=0-" + rangeEnd).build();
 
-        try {
-            enqueue(request);
-            return join();
-        } catch (CompletionException ex) {
-            Throwable cause = ex.getCause();
+            try {
+                enqueue(request);
+                return join();
+            } catch (CompletionException ex) {
+                if (ex.getCause() instanceof IOException cast && "Stop it!".equals(cast.getMessage()))
+                    throw cast;
 
-            if (cause instanceof NoRouteToHostException) {
-                log.error("- '{}': no route to host ({})", name, request.url());
-                return null;
+                log.error(
+                        "- ({}/{}): unexpected exception while connecting to '{}' ({})",
+                        ++attempts, MAX_RETRY_ATTEMPTS, request.url(), name, ex.getCause()
+                );
+
+                if (attempts >= MAX_RETRY_ATTEMPTS) {
+                    try {
+                        Thread.sleep(1000L);
+                    } catch (InterruptedException ignored) {
+                    }
+                } else {
+                    return null;
+                }
+            } finally {
+                close();
             }
-
-            throw cause instanceof Exception cast ? cast : new IOException(cause);
-        } finally {
-            close();
         }
     }
 
@@ -121,7 +132,7 @@ public abstract class ResourceDownloadBase extends CompletableFuture<Path> imple
     @Override
     public void onFailure(Call call, IOException ex) {
         if (ex instanceof SocketTimeoutException) {
-            log.info("- '{}': <timeout> ... retrying ...", name);
+            log.error("- Timeout ({})", name);
             retryRequest(call);
             return;
         }
@@ -158,15 +169,16 @@ public abstract class ResourceDownloadBase extends CompletableFuture<Path> imple
         try (CountingByteChannel channel = CountingByteChannel.wrap(response, this)) {
             this.totalSize = channel.contentLength();
             if (expectedSize > 0L && totalSize != expectedSize)
-                log.warn("Resource download has incorrect size (expected: {}, actual: {})", expectedSize, totalSize);
+                log.warn("- Resource download has incorrect size (expected: {}, actual: {}): {}", expectedSize, totalSize, name);
 
             try {
                 long transferred = transferFrom(channel, 0L, channel.contentLength());
                 if (transferred != totalSize) {
-                    log.warn("Transferred data has incorrect size (expected: {}, actual: {})", totalSize, transferred);
+                    log.warn("- Transferred data has incorrect size (expected: {}, actual: {}): {}", totalSize, transferred, name);
+                    throw new IOException("Stop it!");
                 }
             } catch (SocketTimeoutException ex) {
-                log.info("- '{}': <timeout> ... retrying ...", name);
+                log.info("- Timeout ({})", name);
                 retryRequest(call);
             } catch (IOException ex) {
                 throw ex;
@@ -182,13 +194,13 @@ public abstract class ResourceDownloadBase extends CompletableFuture<Path> imple
     private boolean handlePartialContent(Call call, Response response) throws IOException {
         String contentRange = response.header("Content-Range");
         if (contentRange == null || contentRange.isEmpty()) {
-            log.error("No Content-Range header found!");
+            log.error("- No Content-Range header found! ({})", name);
             return false;
         }
 
         long[] rangeData = parseContentRange(contentRange);
         if (rangeData == null) {
-            log.error("Invalid Content-Range header found: '{}'", contentRange);
+            log.error("- Invalid Content-Range header found: '{}' ({})", contentRange, name);
             return false;
         }
 
@@ -213,10 +225,11 @@ public abstract class ResourceDownloadBase extends CompletableFuture<Path> imple
         try (CountingByteChannel channel = CountingByteChannel.wrap(response, this)) {
             long transferred = transferFrom(channel, rangeData[0], rangeData[2]);
             if (transferred != rangeData[2]) {
-                log.warn("Transferred data chunk has incorrect size (expected: {}, actual: {})", rangeData[2], transferred);
+                log.warn("- Transferred data chunk has incorrect size (expected: {}, actual: {}): {}", rangeData[2], transferred, name);
+                throw new IOException("Stop it!");
             }
         } catch (SocketTimeoutException ex) {
-            log.info("- '{}': <timeout> ... retrying ...", name);
+            log.info("- Timeout ({})", name);
             retryRequest(call);
         } catch (IOException ex) {
             throw ex;
@@ -247,7 +260,7 @@ public abstract class ResourceDownloadBase extends CompletableFuture<Path> imple
     private void initializeBatchData(long[] rangeData) {
         this.totalSize = rangeData[3];
         if (expectedSize > 0L && totalSize != expectedSize)
-            log.warn("Resource download has incorrect size (expected: {}, actual: {})", expectedSize, totalSize);
+            log.warn("- Resource download has incorrect size (expected: {}, actual: {}): {}", expectedSize, totalSize, name);
 
         long chunkSize = service.getChunkSize();
         this.batchSize = (int) (totalSize / chunkSize);
