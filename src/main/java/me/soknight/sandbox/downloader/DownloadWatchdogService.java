@@ -101,7 +101,7 @@ public final class DownloadWatchdogService {
         if (dKBytesReceived == 0L)
             return 0D;
 
-        double timeElapsed = (System.currentTimeMillis() - lastMeasureAt) / 1000D;
+        double timeElapsed = Math.max(1D, System.currentTimeMillis() - lastMeasureAt) / 1000D;
         return Math.max(0D, (dKBytesReceived / 128D) / timeElapsed);
     }
 
