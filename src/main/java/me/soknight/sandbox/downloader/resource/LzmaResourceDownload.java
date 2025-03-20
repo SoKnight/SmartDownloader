@@ -4,14 +4,13 @@ import me.soknight.sandbox.downloader.DownloadService;
 import org.tukaani.xz.LZMAInputStream;
 
 import java.io.IOException;
+import java.io.RandomAccessFile;
 import java.nio.channels.FileChannel;
 import java.nio.channels.ReadableByteChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
-
-import static me.soknight.sandbox.downloader.DownloadService.CHANNEL_OPEN_OPTIONS;
 
 public final class LzmaResourceDownload extends ResourceDownloadBase {
 
@@ -63,7 +62,11 @@ public final class LzmaResourceDownload extends ResourceDownloadBase {
             if (outputChannel == null) {
                 this.compressedFilePath = Files.createTempFile(getService().tempDir(), "lzma-", null);
                 Files.createDirectories(compressedFilePath.toAbsolutePath().getParent());
-                this.outputChannel = FileChannel.open(compressedFilePath, CHANNEL_OPEN_OPTIONS);
+
+                //noinspection resource
+                RandomAccessFile file = new RandomAccessFile(compressedFilePath.toFile(), "rw");
+                file.setLength(getTotalSize());
+                this.outputChannel = file.getChannel();
             }
 
             return outputChannel;

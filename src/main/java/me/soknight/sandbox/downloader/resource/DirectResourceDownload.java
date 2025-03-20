@@ -3,14 +3,13 @@ package me.soknight.sandbox.downloader.resource;
 import me.soknight.sandbox.downloader.DownloadService;
 
 import java.io.IOException;
+import java.io.RandomAccessFile;
 import java.nio.channels.FileChannel;
 import java.nio.channels.ReadableByteChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
-
-import static me.soknight.sandbox.downloader.DownloadService.CHANNEL_OPEN_OPTIONS;
 
 public final class DirectResourceDownload extends ResourceDownloadBase {
 
@@ -46,7 +45,11 @@ public final class DirectResourceDownload extends ResourceDownloadBase {
             if (outputChannel == null) {
                 Path outputFile = getOutputFile();
                 Files.createDirectories(outputFile.getParent());
-                this.outputChannel = FileChannel.open(outputFile, CHANNEL_OPEN_OPTIONS);
+
+                //noinspection resource
+                RandomAccessFile file = new RandomAccessFile(outputFile.toFile(), "rw");
+                file.setLength(getTotalSize());
+                this.outputChannel = file.getChannel();
             }
 
             return outputChannel;
