@@ -6,9 +6,11 @@ import me.soknight.sandbox.downloader.DownloadService;
 import me.soknight.sandbox.downloader.resource.ResourceDownloadBase;
 
 import java.util.Objects;
+import java.util.OptionalDouble;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.StructuredTaskScope;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
@@ -21,11 +23,15 @@ public abstract class DownloadTaskBase extends CompletableFuture<Void> {
     protected final long taskId;
     protected final AtomicLong receivedBytes;
     protected final AtomicLong expectedBytes;
+    protected final AtomicLong latencyMarksSum;
+    protected final AtomicInteger latencyMarksCount;
 
     public DownloadTaskBase() {
         this.taskId = ID_COUNTER.incrementAndGet();
         this.receivedBytes = new AtomicLong();
         this.expectedBytes = new AtomicLong();
+        this.latencyMarksSum = new AtomicLong();
+        this.latencyMarksCount = new AtomicInteger();
     }
 
     protected abstract void offerResourceDownloads(
@@ -34,12 +40,22 @@ public abstract class DownloadTaskBase extends CompletableFuture<Void> {
     );
 
     public final void processTask(DownloadService service) {
+        var optimizerService = service.optimizerService();
         try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
             offerResourceDownloads(service, download -> {
+                download.useLatencyCallback(latency -> {
+                    latencyMarksSum.addAndGet(latency);
+                    latencyMarksCount.incrementAndGet();
+                    optimizerService.acceptLatencyMark(latency);
+                });
+
                 download.useBytesReceivedCallback(bytesReceived -> {
                     receivedBytes.addAndGet(bytesReceived);
                     service.watchdogService().onBytesReceived(bytesReceived);
                 });
+
+//                download.useRequestPassedCallback(optimizerService::onRequestPassed);
+//                download.useRequestFailedCallback(optimizerService::onRequestFailed);
 
                 long expectedSize = download.getExpectedSize();
                 if (expectedSize > 0L) {
@@ -81,6 +97,16 @@ public abstract class DownloadTaskBase extends CompletableFuture<Void> {
 
     public final long getExpectedBytes() {
         return expectedBytes.get();
+    }
+
+    public final OptionalDouble getAverageLatency() {
+        long sum = latencyMarksSum.get();
+        int count = latencyMarksCount.get();
+
+        if (sum <= 0L || count <= 0)
+            return OptionalDouble.empty();
+
+        return OptionalDouble.of((double) sum / count);
     }
 
     @Override

@@ -20,10 +20,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.Comparator;
-import java.util.List;
-import java.util.Map;
-import java.util.Scanner;
+import java.util.*;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
@@ -46,7 +43,7 @@ public final class DownloaderApp implements AutoCloseable {
     }
 
     @SneakyThrows
-    void launch(int maxSimultaneousDownloads) {
+    void launch() {
         log.info("Requesting version list manifest...");
         VersionManifest versionManifest = performCall(launcherMetaAPI.getVersionListManifest());
         if (versionManifest == null)
@@ -111,13 +108,12 @@ public final class DownloaderApp implements AutoCloseable {
 
         double timeSpentSeconds, contentSizeKBytes;
         double[] avgSpeed;
+        OptionalDouble avgLatency;
 
         try (
                 var downloadService = new DownloadService();
                 var scheduledExecutor = Executors.newSingleThreadScheduledExecutor()
         ) {
-            downloadService.configureMaxSimultaneousDownloads(maxSimultaneousDownloads);
-
             MinecraftDownloadTask task = new MinecraftDownloadTask(cacheRootDir)
                     .setAssetIndex(assetIndex)
                     .setClientDownload(clientDownload)
@@ -127,6 +123,7 @@ public final class DownloaderApp implements AutoCloseable {
             log.info("Downloading client distribution...");
             long start = System.currentTimeMillis();
 
+            Random random = new Random();
             scheduledExecutor.scheduleAtFixedRate(() -> {
                 double progress = task.computeProgress();
                 if (progress <= 0D)
@@ -136,16 +133,14 @@ public final class DownloaderApp implements AutoCloseable {
                 if (lastAverageSpeed <= 0D)
                     return;
 
-                double receivedSizeKBytes = task.getReceivedBytes() / 131072D;
-                double totalAvgSpeed = receivedSizeKBytes / (Math.max(1D, System.currentTimeMillis() - start) / 1000D);
-
                 log.info(
-                        "[{}%] Downloaded: {} MB of {} MB (AVG speed: {} mbps, TAS: {} mbps)",
+                        "[{}%] Downloaded: {} MB of {} MB (AVG speed: {} mbps), calls: {}R / {}Q",
                         "%3s".formatted("%.0f".formatted(progress * 100D)),
                         "%5s".formatted("%.1f".formatted(task.getReceivedBytes() / 1048576D)),
                         "%5s".formatted("%.1f".formatted(task.getExpectedBytes() / 1048576D)),
                         "%5s".formatted("%.1f".formatted(lastAverageSpeed)),
-                        "%5s".formatted("%.1f".formatted(totalAvgSpeed))
+                        downloadService.dispatcher().runningCallsCount(),
+                        downloadService.dispatcher().queuedCallsCount()
                 );
             }, 500L, 500L, TimeUnit.MILLISECONDS);
 
@@ -154,6 +149,7 @@ public final class DownloaderApp implements AutoCloseable {
             timeSpentSeconds = (System.currentTimeMillis() - start) / 1000D;
             contentSizeKBytes = task.getExpectedBytes() / 1024D;
             avgSpeed = downloadService.watchdogService().getAverageSpeedMbps();
+            avgLatency = task.getAverageLatency();
         }
 
         log.info("-----------------------------------------------------------------");
@@ -161,6 +157,7 @@ public final class DownloaderApp implements AutoCloseable {
 
         log.info("  Total size: {} MB", "%.1f".formatted(contentSizeKBytes / 1024D));
         log.info("  Time spent: {} second(s)", "%.0f".formatted(timeSpentSeconds));
+        log.info("  Total average latency: {} ms", avgLatency.isPresent() ? "%.1f".formatted(avgLatency.getAsDouble()) : "<N/A>");
         log.info("  Total average speed: {} mbps", "%.1f".formatted(Math.max(0D, (contentSizeKBytes / 128D) / timeSpentSeconds)));
         log.info("  Min average speed: {} mbps", "%.1f".formatted(avgSpeed[1]));
         log.info("  Max average speed: {} mbps", "%.1f".formatted(avgSpeed[2]));

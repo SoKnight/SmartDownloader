@@ -1,5 +1,6 @@
 package me.soknight.sandbox.downloader;
 
+import lombok.AccessLevel;
 import lombok.Getter;
 import lombok.experimental.Accessors;
 import me.soknight.sandbox.downloader.okhttp.NoopHostnameVerifier;
@@ -22,7 +23,6 @@ import java.nio.file.StandardOpenOption;
 import java.security.KeyManagementException;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
-import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.Set;
@@ -40,15 +40,15 @@ public final class DownloadService implements AutoCloseable {
             StandardOpenOption.WRITE
     };
 
-    public static final long CHUNK_SIZE = 4L * 1024L * 1024L;
+    public static final long CHUNK_SIZE = 2L * 1024L * 1024L;
     public static final String USER_AGENT = "SmartDownloader/1.0";
 
+    @Getter(AccessLevel.PACKAGE)
     private final Dispatcher dispatcher;
     private final OkHttpClient httpClient;
-    private final Lock dispatcherSyncLock;
 
-    @Getter
-    private final DownloadWatchdogService watchdogService;
+    @Getter private final DownloadWatchdogService watchdogService;
+    @Getter private final DownloadOptimizerService optimizerService;
     private final Set<DownloadTaskBase> runningTasks;
     private final Lock tasksSyncLock;
 
@@ -56,24 +56,15 @@ public final class DownloadService implements AutoCloseable {
     private final Path tempDir;
 
     public DownloadService() throws IOException {
-        this.dispatcher = createDispatcher();
+        this.dispatcher = new Dispatcher(Executors.newVirtualThreadPerTaskExecutor());
         this.httpClient = createHttpClient();
-        this.dispatcherSyncLock = new ReentrantLock();
 
         this.watchdogService = new DownloadWatchdogService();
+        this.optimizerService = new DownloadOptimizerService(this);
         this.runningTasks = new HashSet<>();
         this.tasksSyncLock = new ReentrantLock();
 
         this.tempDir = Files.createTempDirectory("smart-downloader-");
-    }
-
-    public Set<DownloadTaskBase> getRunningTasks() {
-        try {
-            tasksSyncLock.lock();
-            return runningTasks.isEmpty() ? Collections.emptySet() : Set.copyOf(runningTasks);
-        } finally {
-            tasksSyncLock.unlock();
-        }
     }
 
     public void performTask(DownloadTaskBase task) {
@@ -81,6 +72,7 @@ public final class DownloadService implements AutoCloseable {
             tasksSyncLock.lock();
             runningTasks.add(task);
             watchdogService().start();
+            optimizerService.start();
         } finally {
             tasksSyncLock.unlock();
         }
@@ -93,6 +85,7 @@ public final class DownloadService implements AutoCloseable {
                 tasksSyncLock.lock();
                 if (runningTasks.remove(task) && runningTasks.isEmpty()) {
                     watchdogService().stop();
+                    optimizerService.stop();
                 }
             } finally {
                 tasksSyncLock.unlock();
@@ -100,22 +93,8 @@ public final class DownloadService implements AutoCloseable {
         }
     }
 
-    public void configureMaxSimultaneousDownloads(int maxSimultaneousDownloads) {
-        try {
-            dispatcherSyncLock.lock();
-            dispatcher.setMaxRequests(maxSimultaneousDownloads);
-        } finally {
-            dispatcherSyncLock.unlock();
-        }
-    }
-
     public void enqueue(Request request, Callback callback) {
-        try {
-            dispatcherSyncLock.lock();
-            httpClient.newCall(request).enqueue(callback);
-        } finally {
-            dispatcherSyncLock.unlock();
-        }
+        httpClient.newCall(request).enqueue(callback);
     }
 
     public DirectResourceDownload directDownload(String url, Path outputFile, String name) {
@@ -138,12 +117,18 @@ public final class DownloadService implements AutoCloseable {
         return CHUNK_SIZE;
     }
 
+    public int getActiveConnectionsCount() {
+        var pool = httpClient.connectionPool();
+        return pool.connectionCount() - pool.idleConnectionCount();
+    }
+
     @Override
     public void close() throws IOException {
         httpClient.dispatcher().executorService().shutdown();
         httpClient.connectionPool().evictAll();
 
         watchdogService.shutdown();
+        optimizerService.shutdown();
 
         if (Files.isDirectory(tempDir)) {
             try (Stream<Path> paths = Files.walk(tempDir)) {
@@ -171,12 +156,6 @@ public final class DownloadService implements AutoCloseable {
         } catch (NoSuchAlgorithmException | KeyManagementException ex) {
             throw new RuntimeException(ex);
         }
-    }
-
-    private Dispatcher createDispatcher() {
-        Dispatcher dispatcher = new Dispatcher(Executors.newVirtualThreadPerTaskExecutor());
-        dispatcher.setMaxRequestsPerHost(35);
-        return dispatcher;
     }
 
 }

@@ -20,7 +20,7 @@ public final class DownloadWatchdogService {
     private final double[] speedMarks;
     private final Lock syncLock;
 
-    private ScheduledFuture<?> watchdogFuture;
+    private ScheduledFuture<?> taskFuture;
 
     private int speedMarksCursor;
     private long currentBytesReceived;
@@ -48,11 +48,13 @@ public final class DownloadWatchdogService {
     }
 
     public void onBytesReceived(long bytesReceived) {
-        try {
-            syncLock.lock();
-            this.currentBytesReceived += bytesReceived;
-        } finally {
-            syncLock.unlock();
+        if (bytesReceived > 0L) {
+            try {
+                syncLock.lock();
+                this.currentBytesReceived += bytesReceived;
+            } finally {
+                syncLock.unlock();
+            }
         }
     }
 
@@ -120,7 +122,7 @@ public final class DownloadWatchdogService {
     }
 
     void start() {
-        if (watchdogFuture != null && !watchdogFuture.isCancelled())
+        if (taskFuture != null && !taskFuture.isCancelled())
             return;
 
         try {
@@ -133,20 +135,20 @@ public final class DownloadWatchdogService {
             syncLock.unlock();
         }
 
-        this.watchdogFuture = scheduledAsyncExecutor.scheduleAtFixedRate(this::runWatchdog, 0L, 50L, MILLISECONDS);
+        this.taskFuture = scheduledAsyncExecutor.scheduleAtFixedRate(this::runWatchdog, 0L, 50L, MILLISECONDS);
     }
 
     void stop() {
-        if (watchdogFuture == null || watchdogFuture.isCancelled())
+        if (taskFuture == null || taskFuture.isCancelled())
             return;
 
-        this.watchdogFuture.cancel(true);
-        this.watchdogFuture = null;
+        this.taskFuture.cancel(true);
+        this.taskFuture = null;
     }
 
     void shutdown() {
-        if (watchdogFuture != null) {
-            watchdogFuture.cancel(true);
+        if (taskFuture != null) {
+            taskFuture.cancel(true);
         }
 
         if (scheduledAsyncExecutor != null) {

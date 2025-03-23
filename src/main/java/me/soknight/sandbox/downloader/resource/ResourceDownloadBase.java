@@ -11,6 +11,7 @@ import okhttp3.Request;
 import okhttp3.Response;
 
 import java.io.IOException;
+import java.net.SocketException;
 import java.net.SocketTimeoutException;
 import java.nio.channels.ReadableByteChannel;
 import java.nio.file.Path;
@@ -44,8 +45,10 @@ public abstract class ResourceDownloadBase extends CompletableFuture<Path> imple
     private int batchSize;
     private long totalSize;
 
-    @Getter(AccessLevel.NONE)
-    private LongConsumer bytesReceivedCallback;
+    @Getter(AccessLevel.NONE) private LongConsumer latencyCallback;
+    @Getter(AccessLevel.NONE) private LongConsumer bytesReceivedCallback;
+    @Getter(AccessLevel.NONE) private Runnable requestPassedCallback;
+    @Getter(AccessLevel.NONE) private Runnable requestFailedCallback;
 
     ResourceDownloadBase(DownloadService service, String url, Path outputFile, String name, long expectedSize) {
         this.service = service;
@@ -73,15 +76,13 @@ public abstract class ResourceDownloadBase extends CompletableFuture<Path> imple
                 enqueue(request);
                 return join();
             } catch (CompletionException ex) {
-                if (ex.getCause() instanceof IOException cast && "Stop it!".equals(cast.getMessage()))
-                    throw cast;
-
                 log.error(
-                        "- ({}/{}): unexpected exception while connecting to '{}' ({})",
-                        ++attempts, MAX_RETRY_ATTEMPTS, request.url(), name, ex.getCause()
+                        "[FAIL] Unexpected error while connecting to '{}' ({} of {})",
+                        request.url(), ++attempts, MAX_RETRY_ATTEMPTS, ex.getCause()
                 );
+                onRequestFailed();
 
-                if (attempts >= MAX_RETRY_ATTEMPTS) {
+                if (attempts <= MAX_RETRY_ATTEMPTS) {
                     try {
                         Thread.sleep(1000L);
                     } catch (InterruptedException ignored) {
@@ -117,6 +118,7 @@ public abstract class ResourceDownloadBase extends CompletableFuture<Path> imple
 
             // TODO throw UnsuccessfulResponseException
             log.error("[{}] {}", response.code(), response.request().url());
+            onRequestFailed();
 
             try {
                 syncLock.lock();
@@ -131,36 +133,34 @@ public abstract class ResourceDownloadBase extends CompletableFuture<Path> imple
 
     @Override
     public void onFailure(Call call, IOException ex) {
-        if (ex instanceof SocketTimeoutException) {
-            log.error("- Timeout ({})", name);
-            retryRequest(call);
-            return;
-        }
-
-        completeExceptionally(ex);
-    }
-
-    public void useBytesReceivedCallback(LongConsumer bytesReceivedCallback) {
-        try {
-            syncLock.lock();
-            this.bytesReceivedCallback = bytesReceivedCallback;
-        } finally {
-            syncLock.unlock();
-        }
-    }
-
-    public void onBytesReceived(long bytesReceived) {
-        try {
-            syncLock.lock();
-            if (bytesReceivedCallback != null) {
-                bytesReceivedCallback.accept(bytesReceived);
+        switch (ex) {
+            case SocketTimeoutException _ -> {
+                log.error("[FAIL] Timeout on '{}'", call.request().url());
+                onRequestFailed();
+                retryRequest(call);
             }
-        } finally {
-            syncLock.unlock();
+            case SocketException _ -> {
+                if ("Network is unreachable".equals(ex.getMessage())) {
+                    log.error("[FAIL] Network is unreachable on '{}'", call.request().url());
+                    onRequestFailed();
+                } else {
+                    completeExceptionally(ex);
+                }
+            }
+            default -> completeExceptionally(ex);
         }
     }
 
     private void handleSuccessfulResponse(Call call, Response response) throws IOException {
+        long receivedAt = response.receivedResponseAtMillis();
+        long sentAt = response.sentRequestAtMillis();
+
+        long latencyMillis = Math.max(0L, receivedAt - sentAt);
+        if (latencyCallback != null)
+            latencyCallback.accept(latencyMillis);
+
+        log.debug("[LTNC] {} ms on '{}'", latencyMillis, response.request().url());
+
         // partial content
         if (response.code() == 206 && handlePartialContent(call, response))
             return;
@@ -169,38 +169,48 @@ public abstract class ResourceDownloadBase extends CompletableFuture<Path> imple
         try (CountingByteChannel channel = CountingByteChannel.wrap(response, this)) {
             this.totalSize = channel.contentLength();
             if (expectedSize > 0L && totalSize != expectedSize)
-                log.warn("- Resource download has incorrect size (expected: {}, actual: {}): {}", expectedSize, totalSize, name);
+                log.warn("[SIZE] Resource download has incorrect size (expected: {}, actual: {}): {}", expectedSize, totalSize, call.request().url());
 
+            boolean retry = false;
             try {
                 long transferred = transferFrom(channel, 0L, channel.contentLength());
                 if (transferred != totalSize) {
-                    log.warn("- Transferred data has incorrect size (expected: {}, actual: {}): {}", totalSize, transferred, name);
-                    throw new IOException("Stop it!");
+                    log.error("[FAIL] Transferred data has incorrect size (expected: {}, actual: {}): {}", totalSize, transferred, call.request().url());
+                    onBytesReceived(-transferred);
+                    onRequestFailed();
+                    retry = true;
+                } else {
+                    onRequestPassed();
                 }
-            } catch (SocketTimeoutException ex) {
-                log.info("- Timeout ({})", name);
-                retryRequest(call);
-            } catch (IOException ex) {
-                throw ex;
             } catch (Exception ex) {
-                throw new IOException(ex);
+                if (ex instanceof SocketTimeoutException) {
+                    log.error("[FAIL] Timeout on '{}'", call.request().url());
+                } else {
+                    log.error("[FAIL] {} on '{}'", ex.getClass().getSimpleName(), call.request().url(), ex);
+                }
+                onRequestFailed();
+                retry = true;
             } finally {
-                this.completedChunksCount = 1;
-                complete(outputFile);
+                if (retry) {
+                    retryRequest(call);
+                } else {
+                    this.completedChunksCount = 1;
+                    complete(outputFile);
+                }
             }
         }
     }
 
-    private boolean handlePartialContent(Call call, Response response) throws IOException {
+    private boolean handlePartialContent(Call call, Response response) {
         String contentRange = response.header("Content-Range");
         if (contentRange == null || contentRange.isEmpty()) {
-            log.error("- No Content-Range header found! ({})", name);
+            log.error("[FAIL] No Content-Range header on '{}'", call.request().url());
             return false;
         }
 
         long[] rangeData = parseContentRange(contentRange);
         if (rangeData == null) {
-            log.error("- Invalid Content-Range header found: '{}' ({})", contentRange, name);
+            log.error("[FAIL] Invalid Content-Range header '{}' on '{}'", contentRange, call.request().url());
             return false;
         }
 
@@ -210,7 +220,7 @@ public abstract class ResourceDownloadBase extends CompletableFuture<Path> imple
         try {
             syncLock.lock();
             if (!batchDataKnown) {
-                initializeBatchData(rangeData);
+                initializeBatchData(call, rangeData);
                 runBatchRequests();
             }
         } finally {
@@ -221,28 +231,38 @@ public abstract class ResourceDownloadBase extends CompletableFuture<Path> imple
         return true;
     }
 
-    private void downloadPartialContentChunk(Call call, Response response, long[] rangeData) throws IOException {
+    private void downloadPartialContentChunk(Call call, Response response, long[] rangeData) {
+        boolean retry = false;
         try (CountingByteChannel channel = CountingByteChannel.wrap(response, this)) {
             long transferred = transferFrom(channel, rangeData[0], rangeData[2]);
             if (transferred != rangeData[2]) {
-                log.warn("- Transferred data chunk has incorrect size (expected: {}, actual: {}): {}", rangeData[2], transferred, name);
-                throw new IOException("Stop it!");
+                log.error("[FAIL] Transferred data chunk has incorrect size (expected: {}, actual: {}): {}", rangeData[2], transferred, call.request().url());
+                onBytesReceived(-transferred);
+                onRequestFailed();
+                retry = true;
+            } else {
+                onRequestPassed();
             }
-        } catch (SocketTimeoutException ex) {
-            log.info("- Timeout ({})", name);
-            retryRequest(call);
-        } catch (IOException ex) {
-            throw ex;
         } catch (Exception ex) {
-            throw new IOException(ex);
+            if (ex instanceof SocketTimeoutException) {
+                log.error("[FAIL] Timeout on '{}'", call.request().url());
+            } else {
+                log.error("[FAIL] {} on '{}'", ex.getClass().getSimpleName(), call.request().url(), ex);
+            }
+            onRequestFailed();
+            retry = true;
         } finally {
-            try {
-                syncLock.lock();
-                if (++completedChunksCount >= batchSize) {
-                    complete(outputFile);
+            if (retry) {
+                retryRequest(call);
+            } else {
+                try {
+                    syncLock.lock();
+                    if (++completedChunksCount >= batchSize) {
+                        complete(outputFile);
+                    }
+                } finally {
+                    syncLock.unlock();
                 }
-            } finally {
-                syncLock.unlock();
             }
         }
     }
@@ -257,10 +277,10 @@ public abstract class ResourceDownloadBase extends CompletableFuture<Path> imple
         }
     }
 
-    private void initializeBatchData(long[] rangeData) {
+    private void initializeBatchData(Call call, long[] rangeData) {
         this.totalSize = rangeData[3];
         if (expectedSize > 0L && totalSize != expectedSize)
-            log.warn("- Resource download has incorrect size (expected: {}, actual: {}): {}", expectedSize, totalSize, name);
+            log.warn("[SIZE] Resource download has incorrect size (expected: {}, actual: {}): {}", expectedSize, totalSize, call.request().url());
 
         long chunkSize = service.getChunkSize();
         this.batchSize = (int) (totalSize / chunkSize);
@@ -292,6 +312,75 @@ public abstract class ResourceDownloadBase extends CompletableFuture<Path> imple
         return new long[] { from, to, length, totalLength };
     }
 
+    public void useLatencyCallback(LongConsumer latencyCallback) {
+        try {
+            syncLock.lock();
+            this.latencyCallback = latencyCallback;
+        } finally {
+            syncLock.unlock();
+        }
+    }
+
+    public void useBytesReceivedCallback(LongConsumer bytesReceivedCallback) {
+        try {
+            syncLock.lock();
+            this.bytesReceivedCallback = bytesReceivedCallback;
+        } finally {
+            syncLock.unlock();
+        }
+    }
+
+    public void useRequestPassedCallback(Runnable requestPassedCallback) {
+        try {
+            syncLock.lock();
+            this.requestPassedCallback = requestPassedCallback;
+        } finally {
+            syncLock.unlock();
+        }
+    }
+
+    public void useRequestFailedCallback(Runnable requestFailedCallback) {
+        try {
+            syncLock.lock();
+            this.requestFailedCallback = requestFailedCallback;
+        } finally {
+            syncLock.unlock();
+        }
+    }
+
+    public void onBytesReceived(long bytesReceived) {
+        try {
+            syncLock.lock();
+            if (bytesReceivedCallback != null) {
+                bytesReceivedCallback.accept(bytesReceived);
+            }
+        } finally {
+            syncLock.unlock();
+        }
+    }
+
+    private void onRequestPassed() {
+        try {
+            syncLock.lock();
+            if (requestPassedCallback != null) {
+                requestPassedCallback.run();
+            }
+        } finally {
+            syncLock.unlock();
+        }
+    }
+
+    private void onRequestFailed() {
+        try {
+            syncLock.lock();
+            if (requestFailedCallback != null) {
+                requestFailedCallback.run();
+            }
+        } finally {
+            syncLock.unlock();
+        }
+    }
+
     private void retryRequest(Call call) {
         try {
             syncLock.lock();
@@ -303,6 +392,7 @@ public abstract class ResourceDownloadBase extends CompletableFuture<Path> imple
                 requestBuilder.removeHeader("Range");
             }
 
+            log.info("[RTNG] Retrying request '{}'...", call.request().url());
             enqueue(requestBuilder.build());
         } finally {
             syncLock.unlock();
