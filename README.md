@@ -13,6 +13,16 @@ Just use standard command for running Java apps like this.
 > [!NOTE]
 > The `--enable-preview` JVM argument is mandatory because the algorithm uses the Structured Concurrency API (in preview).
 
+### Rev 0.4 or newer
+```bash
+java --enable-preview -jar smart-downloader-all.jar
+```
+
+> [!TIP]
+> Starting from **rev 0.4**, the optimizing algorithm is used.<br>
+> It tries to automatically suggest the optimal MSD value every 5 seconds with delay 10 seconds.
+
+### Rev 0.3 or older
 ```bash
 java --enable-preview -jar smart-downloader-all.jar <max-simultaneous-downloads>
 ```
